@@ -137,7 +137,7 @@ connect_node_target(Target, Node) ->
 		{Name, Host} when is_list(Name) andalso is_list(Host) ->
 			connect_node_target(Target, {Node, Name, Host});
 		_ ->
-			pang
+			false
 	end.
 
 %% @private
