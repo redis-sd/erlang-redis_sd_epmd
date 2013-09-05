@@ -22,6 +22,7 @@
 	browser_call/3, browser_info/2, browser_terminate/2]).
 
 -record(state, {
+	name  = undefined     :: undefined | any(),
 	watch = gb_sets:new() :: gb_set(),
 	nodes = dict:new()    :: dict()
 }).
@@ -52,15 +53,21 @@ browser_init(#browse{name=Name}, _Opts) ->
 	Lookup = inet_db:res_option(lookup) -- [file],
 	ok = inet_db:set_lookup([file | Lookup]),
 	ok = net_kernel:monitor_nodes(true),
-	State = #state{},
+	State = #state{name=Name},
 	{ok, State}.
 
 %% @private
-browser_service_add(_Domain, _Type, {_Instance, Target, _Port, Options, _TTL}, State=#state{watch=Watch, nodes=Nodes}) ->
+browser_service_add(_Domain, _Type, {_Instance, Target, _Port, Options, _TTL}, State=#state{name=Name, watch=Watch, nodes=Nodes}) ->
 	case get_node(Options) of
 		undefined ->
 			{ok, State};
 		Node ->
+			case gb_sets:is_element(Node, Watch) of
+				true ->
+					ok;
+				false ->
+					redis_sd_epmd_event:nodeadd(Name, Node)
+			end,
 			Watch2 = gb_sets:add_element(Node, Watch),
 			Nodes2 = dict:update(Node, fun({Status, _}) -> {Status, Options} end, {down, Options}, Nodes),
 			_ = erlang:spawn(?MODULE, connect_node, [Target, Node, self()]),
@@ -68,11 +75,17 @@ browser_service_add(_Domain, _Type, {_Instance, Target, _Port, Options, _TTL}, S
 	end.
 
 %% @private
-browser_service_remove(_Domain, _Type, {_Instance, Target, _Port, Options, _TTL}, State=#state{watch=Watch, nodes=Nodes}) ->
+browser_service_remove(_Domain, _Type, {_Instance, Target, _Port, Options, _TTL}, State=#state{name=Name, watch=Watch, nodes=Nodes}) ->
 	case get_node(Options) of
 		undefined ->
 			{ok, State};
 		Node ->
+			case gb_sets:is_element(Node, Watch) of
+				true ->
+					redis_sd_epmd_event:noderemove(Name, Node);
+				false ->
+					ok
+			end,
 			ok = disconnect_node_target(Target, Node),
 			Watch2 = gb_sets:del_element(Node, Watch),
 			Nodes2 = dict:erase(Node, Nodes),
@@ -87,17 +100,29 @@ browser_call(_Request, _From, State) ->
 	{reply, Reply, State}.
 
 %% @private
-browser_info({nodeup, Node}, State=#state{watch=Watch, nodes=Nodes}) ->
+browser_info({nodeup, Node}, State=#state{name=Name, watch=Watch, nodes=Nodes}) ->
 	case gb_sets:is_element(Node, Watch) of
 		true ->
+			case dict:find(Node, Nodes) of
+				{ok, {up, _}} ->
+					ok;
+				_ ->
+					redis_sd_epmd_event:nodeup(Name, Node)
+			end,
 			Nodes2 = dict:update(Node, fun({_, Options}) -> {up, Options} end, {up, []}, Nodes),
 			{ok, State#state{nodes=Nodes2}};
 		false ->
 			{ok, State}
 	end;
-browser_info({nodedown, Node}, State=#state{watch=Watch, nodes=Nodes}) ->
+browser_info({nodedown, Node}, State=#state{name=Name, watch=Watch, nodes=Nodes}) ->
 	case gb_sets:is_element(Node, Watch) of
 		true ->
+			case dict:find(Node, Nodes) of
+				{ok, {up, _}} ->
+					redis_sd_epmd_event:nodedown(Name, Node);
+				_ ->
+					ok
+			end,
 			Nodes2 = dict:update(Node, fun({_, Options}) -> {down, Options} end, {down, []}, Nodes),
 			{ok, State#state{nodes=Nodes2}};
 		false ->

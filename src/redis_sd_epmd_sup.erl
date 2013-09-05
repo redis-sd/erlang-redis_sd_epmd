@@ -35,6 +35,9 @@ start_link() ->
 
 init([]) ->
 	redis_sd_epmd = ets:new(redis_sd_epmd, [ordered_set, public, named_table]),
+	ManagerSpec = {redis_sd_epmd_event:manager(),
+		{gen_event, start_link, [{local, redis_sd_epmd_event:manager()}]},
+		permanent, 5000, worker, [gen_event]},
 	EpmdSpec = {redis_sd_epmd,
 		{redis_sd_epmd, start_link, []},
 		permanent, 5000, worker, [redis_sd_epmd]},
@@ -44,7 +47,7 @@ init([]) ->
 
 	%% five restarts in 60 seconds, then shutdown
 	Restart = {rest_for_one, 5, 60},
-	{ok, {Restart, [EpmdSpec, StarterSpec]}}.
+	{ok, {Restart, [ManagerSpec, EpmdSpec, StarterSpec]}}.
 
 %%%-------------------------------------------------------------------
 %%% Internal functions

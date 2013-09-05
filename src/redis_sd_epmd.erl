@@ -256,3 +256,21 @@ port_please(Name, [Host | Hosts]) ->
 		_ ->
 			port_please(Name, Hosts)
 	end.
+
+%%%-------------------------------------------------------------------
+%%% Test functions
+%%%-------------------------------------------------------------------
+
+-ifdef(TEST).
+
+fake_node_test() ->
+	Node = 'fake-node@fake-host',
+	NodeBin = <<"fake-node@fake-host">>,
+	{Name="fake-node", Host="fake-host"} = node_split(Node),
+	{Name, Host} = node_split(NodeBin),
+	Name = node_name(Node),
+	Host = node_host(Node),
+	Node = node_join(Name, Host),
+	ok.
+
+-endif.
