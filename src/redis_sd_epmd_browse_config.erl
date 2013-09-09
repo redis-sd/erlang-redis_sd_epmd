@@ -41,7 +41,7 @@ config_browser(B) ->
 	end,
 	case lists:keytake(browser, 1, B2) of
 		false ->
-			[{browser, redis_sd_epmd_browser} | B2];
+			[{browser, redis_sd_epmd_browser}, {browser_opts, []} | B2];
 		{value, {browser, SubBrowser}, B3} ->
 			[{browser, redis_sd_epmd_browser}, {browser_opts, [{browser, SubBrowser}, {opts, BrowserOpts}]} | B3]
 	end.

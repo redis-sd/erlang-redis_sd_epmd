@@ -18,13 +18,15 @@
 -export([connect_node/3]).
 
 %% redis_sd_browser callbacks
--export([browser_init/2, browser_service_add/4, browser_service_remove/4,
+-export([browser_init/2, browser_service_add/2, browser_service_remove/2,
 	browser_call/3, browser_info/2, browser_terminate/2]).
 
 -record(state, {
-	name  = undefined     :: undefined | any(),
-	watch = gb_sets:new() :: gb_set(),
-	nodes = dict:new()    :: dict()
+	browser = undefined     :: undefined | module(),
+	bstate  = undefined     :: undefined | any(),
+	name    = undefined     :: undefined | any(),
+	watch   = gb_sets:new() :: gb_set(),
+	nodes   = dict:new()    :: dict()
 }).
 
 %%%===================================================================
@@ -48,17 +50,19 @@ connect_node(Target, Node, Browser) ->
 %%%===================================================================
 
 %% @private
-browser_init(#browse{name=Name}, _Opts) ->
+browser_init(Browse=#browse{name=Name}, Opts) ->
 	ok = redis_sd_epmd:set_browser(Name, self()),
 	Lookup = inet_db:res_option(lookup) -- [file],
 	ok = inet_db:set_lookup([file | Lookup]),
 	ok = net_kernel:monitor_nodes(true),
-	State = #state{name=Name},
-	{ok, State}.
+	Browser = proplists:get_value(browser, Opts),
+	BrowserOpts = proplists:get_value(opts, Opts),
+	State = #state{browser=Browser, bstate=BrowserOpts, name=Name},
+	sub_browser_init(Browse, State).
 
 %% @private
-browser_service_add(_Domain, _Type, {_Instance, Target, _Port, Options, _TTL}, State=#state{name=Name, watch=Watch, nodes=Nodes}) ->
-	case get_node(Options) of
+browser_service_add(Record=#dns_sd{target=Target, txtdata=TXTData}, State=#state{name=Name, watch=Watch, nodes=Nodes}) ->
+	case get_node(TXTData) of
 		undefined ->
 			{ok, State};
 		Node ->
@@ -69,14 +73,14 @@ browser_service_add(_Domain, _Type, {_Instance, Target, _Port, Options, _TTL}, S
 					redis_sd_epmd_event:nodeadd(Name, Node)
 			end,
 			Watch2 = gb_sets:add_element(Node, Watch),
-			Nodes2 = dict:update(Node, fun({Status, _}) -> {Status, Options} end, {down, Options}, Nodes),
+			Nodes2 = dict:update(Node, fun({Status, _}) -> {Status, TXTData} end, {down, TXTData}, Nodes),
 			_ = erlang:spawn(?MODULE, connect_node, [Target, Node, self()]),
-			{ok, State#state{watch=Watch2, nodes=Nodes2}}
+			sub_browser_service_add(Record, State#state{watch=Watch2, nodes=Nodes2})
 	end.
 
 %% @private
-browser_service_remove(_Domain, _Type, {_Instance, Target, _Port, Options, _TTL}, State=#state{name=Name, watch=Watch, nodes=Nodes}) ->
-	case get_node(Options) of
+browser_service_remove(Record=#dns_sd{target=Target, txtdata=TXTData}, State=#state{name=Name, watch=Watch, nodes=Nodes}) ->
+	case get_node(TXTData) of
 		undefined ->
 			{ok, State};
 		Node ->
@@ -89,15 +93,14 @@ browser_service_remove(_Domain, _Type, {_Instance, Target, _Port, Options, _TTL}
 			ok = disconnect_node_target(Target, Node),
 			Watch2 = gb_sets:del_element(Node, Watch),
 			Nodes2 = dict:erase(Node, Nodes),
-			{ok, State#state{watch=Watch2, nodes=Nodes2}}
+			sub_browser_service_remove(Record, State#state{watch=Watch2, nodes=Nodes2})
 	end.
 
 %% @private
 browser_call(nodelist, _From, State=#state{nodes=Nodes}) ->
 	{reply, dict:to_list(Nodes), State};
-browser_call(_Request, _From, State) ->
-	Reply = ok,
-	{reply, Reply, State}.
+browser_call(Request, From, State) ->
+	sub_browser_call(Request, From, State).
 
 %% @private
 browser_info({nodeup, Node}, State=#state{name=Name, watch=Watch, nodes=Nodes}) ->
@@ -109,7 +112,7 @@ browser_info({nodeup, Node}, State=#state{name=Name, watch=Watch, nodes=Nodes}) 
 				_ ->
 					redis_sd_epmd_event:nodeup(Name, Node)
 			end,
-			Nodes2 = dict:update(Node, fun({_, Options}) -> {up, Options} end, {up, []}, Nodes),
+			Nodes2 = dict:update(Node, fun({_, TXTData}) -> {up, TXTData} end, {up, []}, Nodes),
 			{ok, State#state{nodes=Nodes2}};
 		false ->
 			{ok, State}
@@ -123,21 +126,80 @@ browser_info({nodedown, Node}, State=#state{name=Name, watch=Watch, nodes=Nodes}
 				_ ->
 					ok
 			end,
-			Nodes2 = dict:update(Node, fun({_, Options}) -> {down, Options} end, {down, []}, Nodes),
+			Nodes2 = dict:update(Node, fun({_, TXTData}) -> {down, TXTData} end, {down, []}, Nodes),
 			{ok, State#state{nodes=Nodes2}};
 		false ->
 			{ok, State}
 	end;
 browser_info(Info, State) ->
+	sub_browser_info(Info, State).
+
+%% @private
+browser_terminate(Reason, State) ->
+	net_kernel:monitor_nodes(false),
+	sub_browser_terminate(Reason, State).
+
+%%%-------------------------------------------------------------------
+%%% Sub Browser functions
+%%%-------------------------------------------------------------------
+
+%% @private
+sub_browser_init(_Browse, State=#state{browser=undefined}) ->
+	{ok, State};
+sub_browser_init(Browse, State=#state{browser=Browser, bstate=BOpts}) ->
+	case Browser:browser_init(Browse, BOpts) of
+		{ok, BState} ->
+			{ok, State#state{bstate=BState}}
+	end.
+
+%% @private
+sub_browser_service_add(_Record, State=#state{browser=undefined}) ->
+	{ok, State};
+sub_browser_service_add(Record, State=#state{browser=Browser, bstate=BState}) ->
+	case Browser:browser_service_add(Record, BState) of
+		{ok, BState2} ->
+			{ok, State#state{bstate=BState2}}
+	end.
+
+%% @private
+sub_browser_service_remove(_Record, State=#state{browser=undefined}) ->
+	{ok, State};
+sub_browser_service_remove(Record, State=#state{browser=Browser, bstate=BState}) ->
+	case Browser:browser_service_remove(Record, BState) of
+		{ok, BState2} ->
+			{ok, State#state{bstate=BState2}}
+	end.
+
+%% @private
+sub_browser_call(_Request, From, State=#state{browser=undefined}) ->
+	_ = redis_sd_browser:reply(From, {error, no_browser_defined}),
+	{ok, State};
+sub_browser_call(Request, From, State=#state{browser=Browser, bstate=BState}) ->
+	case Browser:browser_call(Request, From, BState) of
+		{noreply, BState2} ->
+			{noreply, State#state{bstate=BState2}};
+		{reply, Reply, BState2} ->
+			{reply, Reply, State#state{bstate=BState2}}
+	end.
+
+%% @private
+sub_browser_info(Info, State=#state{browser=undefined}) ->
 	error_logger:error_msg(
 		"** ~p ~p unhandled info in ~p/~p~n"
 		"   Info was: ~p~n",
-		[?MODULE, self(), browser_info, 2, Info]),
-	{ok, State}.
+		[?MODULE, self(), sub_browser_info, 2, Info]),
+	{ok, State};
+sub_browser_info(Info, State=#state{browser=Browser, bstate=BState}) ->
+	case Browser:browser_info(Info, BState) of
+		{ok, BState2} ->
+			{ok, State#state{bstate=BState2}}
+	end.
 
 %% @private
-browser_terminate(_Reason, _State) ->
-	net_kernel:monitor_nodes(false),
+sub_browser_terminate(_Reason, #state{browser=undefined}) ->
+	ok;
+sub_browser_terminate(Reason, #state{browser=Browser, bstate=BState}) ->
+	_ = Browser:browser_terminate(Reason, BState),
 	ok.
 
 %%%-------------------------------------------------------------------
@@ -145,8 +207,8 @@ browser_terminate(_Reason, _State) ->
 %%%-------------------------------------------------------------------
 
 %% @private
-get_node(Options) ->
-	case get_values([<<"protocol">>, <<"version">>, <<"node">>], Options) of
+get_node(TXTData) ->
+	case get_values([<<"protocol">>, <<"version">>, <<"node">>], TXTData) of
 		[<<"epmd">>, <<"0">>, Node] when is_binary(Node) ->
 			list_to_atom(binary_to_list(Node));
 		_ ->
