@@ -43,7 +43,7 @@ list_to_service(ServiceConfig) ->
 
 -spec list_to_service([module()], [{atom(), term()}]) -> redis_sd_service().
 list_to_service(Apps, ServiceConfig) when is_list(Apps) ->
-	Default = ?REDIS_SD_SERVICE{},
+	_Default = ?REDIS_SD_SERVICE{},
 	Defaults = [
 		{domain, "local", app},
 		{type, "tcp", app},
