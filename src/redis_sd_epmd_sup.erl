@@ -14,7 +14,7 @@
 -include("redis_sd_epmd.hrl").
 
 %% API
--export([start_link/0]).
+-export([start_link/0, start_worker/4]).
 
 %% Supervisor callbacks
 -export([init/1]).
@@ -28,6 +28,10 @@
 
 start_link() ->
 	supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+
+start_worker(Node, Key, Record=?REDIS_SD_DNS{}, Browse=?REDIS_SD_BROWSE{}) ->
+	WorkerSpec = worker_spec(Node, Key, Record, Browse),
+	supervisor:start_child(?MODULE, WorkerSpec).
 
 %%%===================================================================
 %%% Supervisor callbacks
@@ -52,3 +56,9 @@ init([]) ->
 %%%-------------------------------------------------------------------
 %%% Internal functions
 %%%-------------------------------------------------------------------
+
+%% @private
+worker_spec(Node, Key, Record=?REDIS_SD_DNS{}, Browse=?REDIS_SD_BROWSE{ref=Ref}) ->
+	{{redis_sd_epmd_worker, Ref, Key, Node},
+		{redis_sd_epmd_worker, start_link, [Node, Key, Record, Browse]},
+		temporary, brutal_kill, worker, [redis_sd_epmd_worker]}.

@@ -4,6 +4,7 @@
 -module(smoke_SUITE).
 
 -include_lib("common_test/include/ct.hrl").
+-include("../include/redis_sd_epmd.hrl").
 
 -define(REDIS_NS, "smoke_SUITE:").
 
@@ -38,6 +39,8 @@ groups() ->
 init_per_suite(Config) ->
 	ok = application:start(redis_test_server),
 	ok = application:start(hierdis),
+	ok = application:start(backoff),
+	ok = application:start(redis_sd_spec),
 	ok = application:start(redis_sd_client),
 	ok = application:start(redis_sd_server),
 	ok = application:start(redis_sd_epmd),
@@ -47,6 +50,8 @@ end_per_suite(_Config) ->
 	application:stop(redis_sd_epmd),
 	application:stop(redis_sd_server),
 	application:stop(redis_sd_client),
+	application:stop(redis_sd_spec),
+	application:stop(backoff),
 	application:stop(hierdis),
 	application:stop(redis_test_server),
 	ok.
@@ -71,38 +76,45 @@ end_per_group(Name, _Config) ->
 smoke(Config) ->
 	Name = ?config(redis_ref, Config),
 	ok = redis_sd_epmd_event:add_handler(redis_sd_event_handler, self()),
-	{Browse, BrowseConfig} = browse_for_group(Name),
+	{_Browse, BrowseConfig} = browse_for_group(Name),
+	?REDIS_SD_BROWSE{ref=BrowseRef} = redis_sd_epmd_config:list_to_browse(BrowseConfig),
 	{Service, ServiceConfig} = service_for_group(Name),
 	[] = redis_sd_epmd:nodes(),
 	{ok, _} = redis_sd_epmd:new_browse(BrowseConfig),
-	ok = ensure_whereis(Browse, 100, 10),
-	[{Browse,[]}] = redis_sd_epmd:nodes(),
+	ok = ensure_whereis(fun redis_sd_client:whereis_name/1, {pid, BrowseRef}, 100, 10),
+	[{BrowseRef, _}] = redis_sd_epmd:list_browses(),
 	{ok, _} = redis_sd_epmd:new_service(ServiceConfig),
-	ok = ensure_whereis(Service, 100, 10),
+	ok = ensure_whereis(fun erlang:whereis/1, Service, 100, 10),
+	[{Service, _}] = redis_sd_epmd:list_services(),
 	Node = node(),
-	ok = wait_for_message({'$redis_sd', {epmd, nodeadd, Browse, Node}}, 5000),
-	ok = wait_for_message({'$redis_sd', {epmd, nodeup, Browse, Node}}, 5000),
-	case redis_sd_epmd:nodes() of
-		[{Browse, [{Node, {up, _}}]}] ->
-			ok;
-		Nodes0 ->
-			ct:fail(
-				"Expected ~p to be found in nodes list.~n"
-				"Actual: ~p",
-				[Node, Nodes0])
+	ok = receive
+		{'$redis_sd', {epmd, add, BrowseRef, Key, Node}} ->
+			wait_for_message({'$redis_sd', {epmd, up, BrowseRef, Key, Node}}, 5000),
+			case redis_sd_epmd:nodes() of
+				[{Node, true}] ->
+					ok;
+				Nodes0 ->
+					ct:fail(
+						"Expected ~p to be found in nodes list.~n"
+						"Actual: ~p",
+						[Node, Nodes0])
+			end,
+			ok = redis_sd_epmd:rm_service(Service),
+			ok = wait_for_message({'$redis_sd', {epmd, expire, BrowseRef, Key, Node}}, 5000),
+			case redis_sd_epmd:nodes() of
+				[] ->
+					ok;
+				Nodes1 ->
+					ct:fail(
+						"Expected ~p to be found in nodes list.~n"
+						"Actual: ~p",
+						[Node, Nodes1])
+			end,
+			ok = redis_sd_epmd:rm_browse(BrowseRef)
+	after
+		5000 ->
+			message_timeout({'$redis_sd', {epmd, add, BrowseRef, 'Key', Node}}, 5000)
 	end,
-	ok = redis_sd_epmd:rm_service(Service),
-	ok = wait_for_message({'$redis_sd', {epmd, noderemove, Browse, Node}}, 5000),
-	case redis_sd_epmd:nodes() of
-		[{Browse, []}] ->
-			ok;
-		Nodes1 ->
-			ct:fail(
-				"Expected ~p to be found in nodes list.~n"
-				"Actual: ~p",
-				[Node, Nodes1])
-	end,
-	ok = redis_sd_epmd:rm_browse(Browse),
 	ok.
 
 %%--------------------------------------------------------------------
@@ -112,7 +124,6 @@ smoke(Config) ->
 %% @private
 browse_for_group(tcp_simple) ->
 	{tcp_simple_browse, [
-		{name, tcp_simple_browse},
 		{service, "tcp-simple"},
 		{type, "tcp"},
 		{domain, "local"},
@@ -121,7 +132,6 @@ browse_for_group(tcp_simple) ->
 	]};
 browse_for_group(unix_simple) ->
 	{unix_simple_browse, [
-		{name, unix_simple_browse},
 		{service, "unix-simple"},
 		{type, "tcp"},
 		{domain, "local"},
@@ -156,8 +166,8 @@ redis_options_for_group(unix_simple) ->
 	[{unix, true}].
 
 %% @private
-ensure_whereis(Ref, Wait, {Retried, Retried}) ->
-	case erlang:whereis(Ref) of
+ensure_whereis(Fun, Ref, Wait, {Retried, Retried}) ->
+	case Fun(Ref) of
 		Pid when is_pid(Pid) ->
 			ok;
 		Other ->
@@ -166,16 +176,16 @@ ensure_whereis(Ref, Wait, {Retried, Retried}) ->
 				"Returned: ~p",
 				[Ref, Wait * Retried, Other])
 	end;
-ensure_whereis(Ref, Wait, {Retries, Retried}) ->
-	case erlang:whereis(Ref) of
+ensure_whereis(Fun, Ref, Wait, {Retries, Retried}) ->
+	case Fun(Ref) of
 		Pid when is_pid(Pid) ->
 			ok;
 		_ ->
 			timer:sleep(Wait),
-			ensure_whereis(Ref, Wait, {Retries, Retried + 1})
+			ensure_whereis(Fun, Ref, Wait, {Retries, Retried + 1})
 	end;
-ensure_whereis(Ref, Wait, Retries) ->
-	ensure_whereis(Ref, Wait, {Retries, 0}).
+ensure_whereis(Fun, Ref, Wait, Retries) ->
+	ensure_whereis(Fun, Ref, Wait, {Retries, 0}).
 
 %% @private
 wait_for_message(Message, Timeout) ->
@@ -184,18 +194,22 @@ wait_for_message(Message, Timeout) ->
 			ok
 	after
 		Timeout ->
-			receive
-				Received ->
-					ct:fail(
-						"Waited ~pms for message.~n"
-						"Expected: ~p~n"
-						"Received: ~p",
-						[Timeout, Message, Received])
-			after
-				0 ->
-					ct:fail(
-						"Waited ~pms for message, but received nothing.~n"
-						"Expected: ~p",
-						[Timeout, Message])
-			end
+			message_timeout(Message, Timeout)
+	end.
+
+%% @private
+message_timeout(Message, Timeout) ->
+	receive
+		Received ->
+			ct:fail(
+				"Waited ~pms for message.~n"
+				"Expected: ~p~n"
+				"Received: ~p",
+				[Timeout, Message, Received])
+	after
+		0 ->
+			ct:fail(
+				"Waited ~pms for message, but received nothing.~n"
+				"Expected: ~p",
+				[Timeout, Message])
 	end.

@@ -12,31 +12,33 @@
 
 -include("redis_sd_epmd.hrl").
 
+-define(MANAGER, redis_sd_epmd_manager).
+
 %% API
 -export([manager/0, add_handler/2]).
--export([nodeadd/2, nodeup/2, nodedown/2, noderemove/2]).
+-export([add/3, expire/3, up/3, down/3]).
 
 %%%===================================================================
 %%% API functions
 %%%===================================================================
 
 manager() ->
-	redis_sd_epmd_manager.
+	?MANAGER.
 
 add_handler(Handler, Pid) ->
 	gen_event:add_handler(manager(), Handler, Pid).
 
-nodeadd(BrowseName, Node) ->
-	notify({epmd, nodeadd, BrowseName, Node}).
+add(BrowseRef, Key, Node) ->
+	notify({epmd, add, BrowseRef, Key, Node}).
 
-nodeup(BrowseName, Node) ->
-	notify({epmd, nodeup, BrowseName, Node}).
+expire(BrowseRef, Key, Node) ->
+	notify({epmd, expire, BrowseRef, Key, Node}).
 
-nodedown(BrowseName, Node) ->
-	notify({epmd, nodedown, BrowseName, Node}).
+up(BrowseRef, Key, Node) ->
+	notify({epmd, up, BrowseRef, Key, Node}).
 
-noderemove(BrowseName, Node) ->
-	notify({epmd, noderemove, BrowseName, Node}).
+down(BrowseRef, Key, Node) ->
+	notify({epmd, down, BrowseRef, Key, Node}).
 
 %%%-------------------------------------------------------------------
 %%% Internal functions
