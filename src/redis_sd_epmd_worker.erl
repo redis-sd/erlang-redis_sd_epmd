@@ -39,19 +39,6 @@ init(Node, Key, Record=?REDIS_SD_DNS{}, Browse=?REDIS_SD_BROWSE{}) ->
 %%% States
 %%%-------------------------------------------------------------------
 
-% %% @private
-% disconnect_node_target(_Target, {Node, _Name, Host}) ->
-% 	ok = redis_sd_epmd:del_host(Host),
-% 	_ = erlang:disconnect_node(Node),
-% 	ok;
-% disconnect_node_target(Target, Node) ->
-% 	case catch redis_sd_epmd:node_split(Node) of
-% 		{Name, Host} when is_list(Name) andalso is_list(Host) ->
-% 			disconnect_node_target(Target, {Node, Name, Host});
-% 		_ ->
-% 			ok
-% 	end.
-
 %% @private
 connect(Node, Key, Record=?REDIS_SD_DNS{target=Target}, Browse=?REDIS_SD_BROWSE{ref=BrowseRef}) ->
 	case catch redis_sd_epmd:node_split(Node) of
